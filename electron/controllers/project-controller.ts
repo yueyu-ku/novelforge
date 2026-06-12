@@ -50,6 +50,7 @@ export function registerProjectController() {
       })
 
       // 补充缺失在 DB 初始化时生成所需的数据
+      const coreData = ProjectCoreRepository.get()
       const projectData: ProjectData = {
         id: projectId,
         name: config.name,
@@ -69,8 +70,8 @@ export function registerProjectController() {
           globalGuidance: '',
         },
         characterStates: '',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        createdAt: coreData?.createdAt || new Date().toISOString(),
+        updatedAt: coreData?.updatedAt || new Date().toISOString(),
       }
 
       // 添加到最近项目列表
@@ -102,7 +103,10 @@ export function registerProjectController() {
       }
 
       // 组装返回给前端的数据结构
-      const updatedCoreData = ProjectCoreRepository.get()!
+      const updatedCoreData = ProjectCoreRepository.get()
+      if (!updatedCoreData) {
+        return { success: false, project: null, error: '无法读取项目配置，数据库可能未正确初始化' }
+      }
       const projectData: ProjectData = {
         id: 'main',
         name: updatedCoreData.projectName,
@@ -124,8 +128,8 @@ export function registerProjectController() {
           referenceWorks: updatedCoreData.referenceWorks,
         },
         characterStates: updatedCoreData.characterStates,
-        createdAt: new Date().toISOString(), // db 中实际上有，但这里先 mock 一下时间避免前端报错
-        updatedAt: new Date().toISOString(),
+        createdAt: updatedCoreData.createdAt || new Date().toISOString(),
+        updatedAt: updatedCoreData.updatedAt || new Date().toISOString(),
       }
 
       addRecentProject({ name: projectData.name, path: projectPath, updatedAt: projectData.updatedAt })
@@ -137,34 +141,44 @@ export function registerProjectController() {
   })
 
   // 保存/更新项目配置
-  // 注意：这个接口前端可能还传了很多 novelConfig 中的字段，我们需要 mapping 给 DB。
+  // 注意：novelConfig 字段与 DB project_core 列的映射关系（前后端字段名不同）
   ipcMain.handle('project:save', async (_event, _projectId: string, data: Partial<ProjectData>) => {
     try {
       if (!data.path) return { success: false, error: '缺少项目路径' }
 
-      if (data.novelConfig) {
-        ProjectCoreRepository.update({
-          genre: data.novelConfig.genre,
-          subGenre: data.novelConfig.subGenre,
-          targetAudience: data.novelConfig.targetAudience,
-          totalChapters: data.novelConfig.totalChapters,
-          wordsPerChapter: data.novelConfig.wordsPerChapter,
-          plotStructure: data.novelConfig.plotStructure,
-          narrativePov: data.novelConfig.narrativePOV,
-          goldenFinger: data.novelConfig.goldenFinger,
-          globalGuidance: data.novelConfig.globalGuidance,
-          writingStyle: data.novelConfig.writingStyle ?? '',
-          referenceWorks: data.novelConfig.referenceWorks ?? '',
-        })
-      }
+      // 收集所有需要更新的字段，合并为单次 UPDATE
+      const updateData: Partial<import('../repositories/project-core-repository').ProjectCoreData> = {}
 
       if (data.name) {
-        ProjectCoreRepository.update({ projectName: data.name })
+        updateData.projectName = data.name
+      }
+
+      if (data.novelConfig) {
+        const nc = data.novelConfig
+        if (nc.genre !== undefined) updateData.genre = nc.genre
+        if (nc.subGenre !== undefined) updateData.subGenre = nc.subGenre
+        if (nc.targetAudience !== undefined) updateData.targetAudience = nc.targetAudience
+        if (nc.totalChapters !== undefined) updateData.totalChapters = nc.totalChapters
+        if (nc.wordsPerChapter !== undefined) updateData.wordsPerChapter = nc.wordsPerChapter
+        if (nc.plotStructure !== undefined) updateData.plotStructure = nc.plotStructure
+        if (nc.narrativePOV !== undefined) updateData.narrativePov = nc.narrativePOV
+        if (nc.goldenFinger !== undefined) updateData.goldenFinger = nc.goldenFinger
+        if (nc.globalGuidance !== undefined) updateData.globalGuidance = nc.globalGuidance
+        if (nc.writingStyle !== undefined) updateData.writingStyle = nc.writingStyle
+        if (nc.referenceWorks !== undefined) updateData.referenceWorks = nc.referenceWorks
+        // 关键修复：反向映射旧字段名 → DB 列名
+        if (nc.coreOutline !== undefined) updateData.synopsis = nc.coreOutline
+        if (nc.worldSetting !== undefined) updateData.worldbuilding = nc.worldSetting
+        if (nc.protagonistProfile !== undefined) updateData.charactersArch = nc.protagonistProfile
       }
 
       if (data.characterStates !== undefined) {
-        ProjectCoreRepository.update({ characterStates: data.characterStates })
+        updateData.characterStates = data.characterStates
       }
+
+      // 单次批量更新
+      ProjectCoreRepository.update(updateData)
+      console.log('[project:save] 配置已持久化，字段数:', Object.keys(updateData).length)
 
       addRecentProject({
         name: data.name ?? 'Unknown',
@@ -182,19 +196,23 @@ export function registerProjectController() {
   ipcMain.handle('project:update-config', async (_event, _projectId: string, data: Partial<ProjectData>) => {
     try {
       if (data.novelConfig) {
-        ProjectCoreRepository.update({
-          genre: data.novelConfig.genre,
-          subGenre: data.novelConfig.subGenre,
-          targetAudience: data.novelConfig.targetAudience,
-          totalChapters: data.novelConfig.totalChapters,
-          wordsPerChapter: data.novelConfig.wordsPerChapter,
-          plotStructure: data.novelConfig.plotStructure,
-          narrativePov: data.novelConfig.narrativePOV,
-          goldenFinger: data.novelConfig.goldenFinger,
-          globalGuidance: data.novelConfig.globalGuidance,
-          writingStyle: data.novelConfig.writingStyle ?? '',
-          referenceWorks: data.novelConfig.referenceWorks ?? '',
-        })
+        const nc = data.novelConfig
+        const updateData: Partial<import('../repositories/project-core-repository').ProjectCoreData> = {}
+        if (nc.genre !== undefined) updateData.genre = nc.genre
+        if (nc.subGenre !== undefined) updateData.subGenre = nc.subGenre
+        if (nc.targetAudience !== undefined) updateData.targetAudience = nc.targetAudience
+        if (nc.totalChapters !== undefined) updateData.totalChapters = nc.totalChapters
+        if (nc.wordsPerChapter !== undefined) updateData.wordsPerChapter = nc.wordsPerChapter
+        if (nc.plotStructure !== undefined) updateData.plotStructure = nc.plotStructure
+        if (nc.narrativePOV !== undefined) updateData.narrativePov = nc.narrativePOV
+        if (nc.goldenFinger !== undefined) updateData.goldenFinger = nc.goldenFinger
+        if (nc.globalGuidance !== undefined) updateData.globalGuidance = nc.globalGuidance
+        if (nc.writingStyle !== undefined) updateData.writingStyle = nc.writingStyle
+        if (nc.referenceWorks !== undefined) updateData.referenceWorks = nc.referenceWorks
+        if (nc.coreOutline !== undefined) updateData.synopsis = nc.coreOutline
+        if (nc.worldSetting !== undefined) updateData.worldbuilding = nc.worldSetting
+        if (nc.protagonistProfile !== undefined) updateData.charactersArch = nc.protagonistProfile
+        ProjectCoreRepository.update(updateData)
       }
       return { success: true }
     } catch (error) {

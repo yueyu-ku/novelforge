@@ -92,7 +92,7 @@ export class BlueprintRepository {
     /** 插入或更新蓝图 */
     static upsert(data: BlueprintData): void {
         const db = getProjectDb()
-        if (!db) return
+        if (!db) throw new Error('[BlueprintRepository] 数据库未连接，无法保存蓝图')
 
         db.prepare(`
       INSERT INTO blueprints (
@@ -127,7 +127,7 @@ export class BlueprintRepository {
     /** 批量插入/更新蓝图（事务） */
     static upsertMany(items: BlueprintData[]): void {
         const db = getProjectDb()
-        if (!db) return
+        if (!db) throw new Error('[BlueprintRepository] 数据库未连接，无法批量保存蓝图')
 
         const tx = db.transaction(() => {
             for (const item of items) {
@@ -140,7 +140,7 @@ export class BlueprintRepository {
     /** 删除蓝图 */
     static delete(chapterNumber: number): void {
         const db = getProjectDb()
-        if (!db) return
+        if (!db) throw new Error('[BlueprintRepository] 数据库未连接，无法删除蓝图')
 
         db.prepare('DELETE FROM blueprints WHERE chapter_number = ?').run(chapterNumber)
     }
@@ -148,7 +148,7 @@ export class BlueprintRepository {
     /** 仅更新 notes 字段 */
     static updateNotes(chapterNumber: number, notes: string): void {
         const db = getProjectDb()
-        if (!db) return
+        if (!db) throw new Error('[BlueprintRepository] 数据库未连接，无法更新蓝图笔记')
 
         db.prepare(`
       UPDATE blueprints

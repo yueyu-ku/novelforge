@@ -1,6 +1,8 @@
 import { app, BrowserWindow } from 'electron'
 import { registerIPCHandlers } from './ipc-handlers'
 import { registerMCPHandlers } from './mcp/mcp-ipc-bridge'
+import { closeProjectDatabase } from './database'
+import { installGlobalErrorHandlers, logger } from './utils/logger'
 
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -50,13 +52,17 @@ function createWindow() {
 
   if (VITE_DEV_SERVER_URL) {
     win.loadURL(VITE_DEV_SERVER_URL)
+    logger.info('Main', `开发模式: ${VITE_DEV_SERVER_URL}`)
   } else {
     win.loadFile(path.join(RENDERER_DIST, 'index.html'))
+    logger.info('Main', '生产模式启动')
   }
 }
 
 // macOS: 关闭所有窗口不退出
 app.on('window-all-closed', () => {
+  closeProjectDatabase()
+  logger.info('Main', '所有窗口已关闭')
   if (process.platform !== 'darwin') {
     app.quit()
     win = null
@@ -70,8 +76,17 @@ app.on('activate', () => {
   }
 })
 
+// 应用即将退出时清理
+app.on('before-quit', () => {
+  closeProjectDatabase()
+  logger.info('Main', '应用即将退出')
+  logger.close()
+})
+
 app.whenReady().then(() => {
+  installGlobalErrorHandlers()
   registerIPCHandlers()
   registerMCPHandlers()
   createWindow()
+  logger.info('Main', 'Vela 启动完成')
 })

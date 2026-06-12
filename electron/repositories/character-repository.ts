@@ -114,7 +114,7 @@ export class CharacterRepository {
     /** 插入或更新角色 */
     static upsert(data: CharacterData): void {
         const db = getProjectDb()
-        if (!db) return
+        if (!db) throw new Error('[CharacterRepository] 数据库未连接，无法保存角色')
 
         const cs = data.currentState
         db.prepare(`
@@ -170,7 +170,7 @@ export class CharacterRepository {
     /** 批量保存角色（事务） */
     static saveAll(characters: CharacterData[]): void {
         const db = getProjectDb()
-        if (!db) return
+        if (!db) throw new Error('[CharacterRepository] 数据库未连接，无法保存角色卡')
 
         const tx = db.transaction(() => {
             for (const char of characters) {
@@ -183,7 +183,7 @@ export class CharacterRepository {
     /** 删除角色 */
     static delete(name: string): void {
         const db = getProjectDb()
-        if (!db) return
+        if (!db) throw new Error('[CharacterRepository] 数据库未连接，无法删除角色')
 
         db.prepare('DELETE FROM characters WHERE name = ?').run(name)
     }
@@ -191,7 +191,7 @@ export class CharacterRepository {
     /** 仅更新角色动态状态（后处理时使用） */
     static updateState(name: string, state: CharacterStateData): void {
         const db = getProjectDb()
-        if (!db) return
+        if (!db) throw new Error('[CharacterRepository] 数据库未连接，无法更新角色状态')
 
         db.prepare(`
       UPDATE characters SET

@@ -75,6 +75,15 @@ export function registerDatabaseController() {
     }
   })
 
+  ipcMain.handle('db:blueprint-delete', async (_event, chapterNumber: number) => {
+    try {
+      BlueprintRepository.delete(chapterNumber)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
   // ============================================================
   // 3. characters — 角色卡
   // ============================================================
@@ -159,6 +168,11 @@ export function registerDatabaseController() {
   ipcMain.handle('db:draft-get-max-finalized-chapter', async () => {
     return DraftRepository.getMaxFinalizedChapter()
   })
+
+  ipcMain.handle('db:draft-get-all-chapter-numbers', async () => {
+    return DraftRepository.getAllChapterNumbers()
+  })
+
   ipcMain.handle('db:draft-next-version', async (_event, chapterNumber: number) => {
     return DraftRepository.getNextVersion(chapterNumber)
   })
@@ -184,7 +198,7 @@ export function registerDatabaseController() {
   // ============================================================
   // 5. revisions — 修稿
   // ============================================================
-ipcMain.handle('db:revision-create', async (_event, params: {
+  ipcMain.handle('db:revision-create', async (_event, params: {
     baseDraftId: number
     revisionIndex: number
     revisionType: 'refine' | 'review-fix'

@@ -42,6 +42,56 @@ async function ensureMigration(projectPath: string): Promise<void> {
 
 // ===== 导出函数（保持旧签名，IPC 层零改动） =====
 
+/** 核心导入逻辑（复用体）：分块 → 向量化 → 清理旧数据 → 写入 LanceDB */
+async function importContent(
+  projectPath: string,
+  fileName: string,
+  content: string,
+  protocol: 'openai' | 'gemini',
+  model: { baseUrl: string; apiKey: string },
+  options?: { filePath?: string; onProgress?: (pct: number, msg: string) => void },
+): Promise<{ success: boolean; docId?: string; chunkCount?: number; error?: string }> {
+  await ensureMigration(projectPath)
+
+  // 1. 分块
+  options?.onProgress?.(10, '正在分块...')
+  const chunks = chunkText(content, 500, 50)
+  const docId = randomUUID()
+
+  // 2. 解析章节元数据（从文件名提取）
+  const chapterMeta = parseChapterMetaFromFileName(fileName)
+
+  // 3. 可选：生成向量
+  let vectors: number[][] | undefined
+  if (model.apiKey) {
+    try {
+      options?.onProgress?.(20, `正在向量化 ${chunks.length} 个块...`)
+      vectors = await generateEmbeddings(chunks, protocol, model)
+    } catch (e) {
+      console.warn('[Vela KB] Embedding 调用失败，降级为 FTS-only:', e)
+    }
+  }
+
+  // 4. 删除同名旧文档，确保幂等性
+  options?.onProgress?.(70, '正在清理旧数据...')
+  const existingDocs = await storeListDocuments(projectPath)
+  const existingDoc = existingDocs.find(d => d.fileName === fileName)
+  if (existingDoc) {
+    await removeDocFromStore(projectPath, existingDoc.id)
+  }
+
+  // 5. 写入 LanceDB
+  options?.onProgress?.(80, '正在保存...')
+  const result = await addChunks(projectPath, docId, fileName, chunks, vectors, options?.filePath, chapterMeta)
+
+  if (!result.success) {
+    return { success: false, error: result.error }
+  }
+
+  options?.onProgress?.(100, `✅ 已导入 ${fileName}（${chunks.length} 个块）`)
+  return { success: true, docId, chunkCount: chunks.length }
+}
+
 /**
  * 导入文档到知识库（单文件，从磁盘读取）
  * 始终建立 FTS 索引；有 Embedding 配置时额外生成向量
@@ -54,9 +104,7 @@ export async function importDocument(
   onProgress?: (progress: number, message: string) => void,
 ): Promise<{ success: boolean; docId?: string; chunkCount?: number; error?: string }> {
   try {
-    await ensureMigration(projectPath)
-
-    // 1. 读取文件
+    // 1. 读取并校验文件
     const fileName = path.basename(filePath)
     const ext = path.extname(filePath).toLowerCase()
     if (!['.txt', '.md', '.markdown'].includes(ext)) {
@@ -69,33 +117,8 @@ export async function importDocument(
       return { success: false, error: '文件内容为空' }
     }
 
-    // 2. 分块
-    onProgress?.(10, '正在分块...')
-    const chunks = chunkText(content, 500, 50)
-    const docId = randomUUID()
-
-    // 3. 可选：生成向量（如果有 Embedding 配置）
-    let vectors: number[][] | undefined
-    if (model.apiKey) {
-      try {
-        onProgress?.(20, `正在向量化 ${chunks.length} 个块...`)
-        vectors = await generateEmbeddings(chunks, protocol, model)
-      } catch (e) {
-        console.warn('[Vela KB] Embedding 调用失败，降级为 FTS-only:', e)
-        // 不影响导入，仅 FTS
-      }
-    }
-
-    // 4. 写入 LanceDB（text + 元数据 + 可选向量）
-    onProgress?.(80, '正在保存...')
-    const result = await addChunks(projectPath, docId, fileName, chunks, vectors, filePath)
-
-    if (!result.success) {
-      return { success: false, error: result.error }
-    }
-
-    onProgress?.(100, `✅ 已导入 ${fileName}（${chunks.length} 个块）`)
-    return { success: true, docId, chunkCount: chunks.length }
+    // 2. 委托核心导入逻辑
+    return importContent(projectPath, fileName, content, protocol, model, { filePath, onProgress })
   } catch (error) {
     return { success: false, error: String(error) }
   }
@@ -245,40 +268,7 @@ export async function importText(
 ): Promise<{ success: boolean; docId?: string; chunkCount?: number; error?: string }> {
   try {
     if (!text.trim()) return { success: false, error: '文本内容为空' }
-
-    await ensureMigration(projectPath)
-
-    // 分块
-    const chunks = chunkText(text)
-    const docId = randomUUID()
-
-    // 解析章节元数据（从文件名提取）
-    const chapterMeta = parseChapterMetaFromFileName(fileName)
-
-    // 可选：生成向量
-    let vectors: number[][] | undefined
-    if (model.apiKey) {
-      try {
-        vectors = await generateEmbeddings(chunks, protocol, model)
-      } catch (e) {
-        console.warn('[Vela KB] importText Embedding 失败，降级 FTS-only:', e)
-      }
-    }
-
-    // 先删除同名旧文档（幂等性由 vector-store 的 addChunks 内部处理 documents 表）
-    // 但 chunks 表需要手动清理旧的同名文档块
-    const existingDocs = await storeListDocuments(projectPath)
-    const existingDoc = existingDocs.find(d => d.fileName === fileName)
-    if (existingDoc) {
-      await removeDocFromStore(projectPath, existingDoc.id)
-    }
-
-    const result = await addChunks(projectPath, docId, fileName, chunks, vectors, undefined, chapterMeta)
-    if (!result.success) {
-      return { success: false, error: result.error }
-    }
-
-    return { success: true, docId, chunkCount: chunks.length }
+    return importContent(projectPath, fileName, text, protocol, model)
   } catch (error) {
     return { success: false, error: String(error) }
   }
@@ -355,20 +345,25 @@ export async function backfillVectors(
 
     // 使用显式 Arrow Schema 确保 vector 列正确持久化
     // LanceDB 自动推断无法正确识别 number[] 为 FixedSizeList 向量类型
-    const VECTOR_DIM = 2048
-    const vectorField = new Field('vector', new ArrowFixedSizeList(VECTOR_DIM, new Field('item', new Float32())), true)
-    const arrowSchema = new ArrowSchema([
+    // 从实际生成的向量中检测维度
+    const VECTOR_DIM = vectors.length > 0 && vectors[0].length > 0 ? vectors[0].length : 0
+    const arrowFields: Field[] = [
       new Field('id', new Utf8()),
       new Field('docId', new Utf8()),
       new Field('fileName', new Utf8()),
       new Field('chapterNumber', new Int32(), true),
       new Field('chapterTitle', new Utf8(), true),
       new Field('text', new Utf8()),
-      vectorField,
+    ]
+    if (VECTOR_DIM > 0) {
+      arrowFields.push(new Field('vector', new ArrowFixedSizeList(VECTOR_DIM, new Field('item', new Float32())), true))
+    }
+    arrowFields.push(
       new Field('chunkIndex', new Int32()),
       new Field('totalChunks', new Int32()),
       new Field('importedAt', new Utf8()),
-    ])
+    )
+    const arrowSchema = new ArrowSchema(arrowFields)
 
     // 删除旧表，用带显式 schema 的 createTable 重新写入
     await db.dropTable('chunks')

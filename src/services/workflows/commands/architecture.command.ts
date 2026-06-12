@@ -70,39 +70,44 @@ export class GenerateConfigCommand extends BaseWorkflowCommand<string> {
     )
 
     callbacks.log('解析完成，正在应用到项目配置...')
+    let parsed: Partial<NovelConfig>
     try {
-      const parsed = this.parseJSON<Partial<NovelConfig>>(resultRaw)
-
-      // 防御：LLM 常常将长文本字段错误地生成为对象或数组
-      const stringifyField = (val: unknown) => {
-        if (!val) return ''
-        if (typeof val === 'string') return val
-        if (Array.isArray(val)) return val.join('\n')
-        if (typeof val === 'object') return JSON.stringify(val, null, 2)
-        return String(val)
-      }
-
-      if (parsed.coreOutline !== undefined) parsed.coreOutline = stringifyField(parsed.coreOutline)
-      if (parsed.worldSetting !== undefined) parsed.worldSetting = stringifyField(parsed.worldSetting)
-      if (parsed.goldenFinger !== undefined) parsed.goldenFinger = stringifyField(parsed.goldenFinger)
-      if (parsed.protagonistProfile !== undefined) parsed.protagonistProfile = stringifyField(parsed.protagonistProfile)
-      if (parsed.globalGuidance !== undefined) parsed.globalGuidance = stringifyField(parsed.globalGuidance)
-      if (parsed.referenceWorks !== undefined) parsed.referenceWorks = stringifyField(parsed.referenceWorks)
-      if (parsed.writingStyle !== undefined) parsed.writingStyle = stringifyField(parsed.writingStyle)
-
-      if (parsed.totalChapters !== undefined) parsed.totalChapters = parseInt(String(parsed.totalChapters)) || 100
-      if (parsed.wordsPerChapter !== undefined) parsed.wordsPerChapter = parseInt(String(parsed.wordsPerChapter)) || 3000
-
-      this.onGenerated(parsed)
-      const saved = await useProjectStore.getState().saveProject()
-
-      if (saved) {
-        callbacks.log('✅ AI 配置生成并保存成功，请检查各字段后点击「生成架构」')
-      } else {
-        callbacks.log('✅ AI 配置生成成功，请检查各字段后点击「立即保存」')
-      }
+      parsed = this.parseJSON<Partial<NovelConfig>>(resultRaw)
     } catch (e) {
       throw new Error('AI 返回的内容无法解析为 JSON，请重试或缩短输入。详细信息: ' + String(e))
+    }
+
+    // 防御：LLM 常常将长文本字段错误地生成为对象或数组
+    const stringifyField = (val: unknown) => {
+      if (!val) return ''
+      if (typeof val === 'string') return val
+      if (Array.isArray(val)) return val.join('\n')
+      if (typeof val === 'object') return JSON.stringify(val, null, 2)
+      return String(val)
+    }
+
+    if (parsed.coreOutline !== undefined) parsed.coreOutline = stringifyField(parsed.coreOutline)
+    if (parsed.worldSetting !== undefined) parsed.worldSetting = stringifyField(parsed.worldSetting)
+    if (parsed.goldenFinger !== undefined) parsed.goldenFinger = stringifyField(parsed.goldenFinger)
+    if (parsed.protagonistProfile !== undefined) parsed.protagonistProfile = stringifyField(parsed.protagonistProfile)
+    if (parsed.globalGuidance !== undefined) parsed.globalGuidance = stringifyField(parsed.globalGuidance)
+    if (parsed.referenceWorks !== undefined) parsed.referenceWorks = stringifyField(parsed.referenceWorks)
+    if (parsed.writingStyle !== undefined) parsed.writingStyle = stringifyField(parsed.writingStyle)
+
+    if (parsed.totalChapters !== undefined) parsed.totalChapters = parseInt(String(parsed.totalChapters)) || 100
+    if (parsed.wordsPerChapter !== undefined) parsed.wordsPerChapter = parseInt(String(parsed.wordsPerChapter)) || 3000
+
+    // 先更新前端 Store
+    this.onGenerated(parsed)
+    callbacks.log('配置已应用至界面，正在持久化到数据库...')
+
+    // 再持久化到数据库
+    const saved = await useProjectStore.getState().saveProject()
+
+    if (saved) {
+      callbacks.log('✅ AI 配置生成并保存成功，请检查各字段后点击「生成架构」')
+    } else {
+      callbacks.log('⚠️ AI 配置已在界面显示，但数据库保存失败。请点击工具栏「保存」按钮手动保存，或检查项目是否正常打开。')
     }
     callbacks.setProgress(100)
     return '生成的配置已成功应用！'

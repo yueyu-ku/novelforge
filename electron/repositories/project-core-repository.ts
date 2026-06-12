@@ -49,6 +49,8 @@ export interface ProjectCoreData {
     charactersArch: string
     synopsis: string
     characterStates: string
+    createdAt: string
+    updatedAt: string
 }
 
 /** 数据库行 → 前端数据 */
@@ -71,6 +73,8 @@ function rowToData(row: ProjectCoreRow): ProjectCoreData {
         charactersArch: row.characters_arch,
         synopsis: row.synopsis,
         characterStates: row.character_states,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
     }
 }
 
@@ -101,7 +105,10 @@ export class ProjectCoreRepository {
     /** 更新项目配置（传入部分字段即可） */
     static update(data: Partial<ProjectCoreData>): void {
         const db = getProjectDb()
-        if (!db) return
+        if (!db) {
+            console.error('[ProjectCoreRepository] 数据库未连接，无法保存配置')
+            throw new Error('项目数据库未连接，请关闭项目后重新打开')
+        }
 
         // 构建动态 SET 子句，只更新传入的字段
         const fieldMap: Record<string, string> = {

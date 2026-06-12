@@ -23,6 +23,222 @@ export function stripThinkingTags(text: string): string {
   return text.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').trim()
 }
 
+// ===== 健壮 JSON 解析 =====
+
+/**
+ * 从 AI 原始输出中提取并解析 JSON
+ *
+ * 自动处理 AI 常见的 JSON 格式错误：
+ * - markdown ```json 代码块包裹
+ * - 尾随逗号
+ * - 键名缺引号
+ * - 缺失的逗号
+ * - 连续逗号
+ * - 文本前/后的引导语
+ *
+ * @param text AI 原始输出文本
+ * @param preferArray true = 优先解析为数组，false = 优先解析为对象
+ * @returns 解析后的 JSON 值，失败返回 null
+ */
+export function robustParseJSON(text: string, preferArray: boolean = false): unknown | null {
+  if (!text) return null
+
+  let content = text
+
+  // 1. 移除 markdown 代码块
+  content = content.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
+
+  // 2. 找出 JSON 边界
+  const firstBrace = content.indexOf('{')
+  const lastBrace = content.lastIndexOf('}')
+  const firstBracket = content.indexOf('[')
+  const lastBracket = content.lastIndexOf(']')
+
+  // 决定提取范围
+  let extractStart: number
+  let extractEnd: number
+
+  if (preferArray && firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+    extractStart = firstBracket
+    extractEnd = lastBracket
+  } else if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    extractStart = firstBrace
+    extractEnd = lastBrace
+  } else if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+    extractStart = firstBracket
+    extractEnd = lastBracket
+  } else {
+    return null // 无有效 JSON 结构
+  }
+
+  let jsonStr = content.substring(extractStart, extractEnd + 1)
+
+  // 3. 尝试直接解析
+  try {
+    return JSON.parse(jsonStr)
+  } catch {
+    // 继续到自动修复
+  }
+
+  // 4. 自动修复常见 AI JSON 格式错误
+  try {
+    let fixed = jsonStr
+      // 尾随逗号: ,]  ,}
+      .replace(/,(\s*[}\]])/g, '$1')
+      // 缺失前引号的键: { key": → { "key":
+      .replace(/([\[{,]\s*)(\w+)":/g, '$1"$2":')
+      // 连续字符串间缺逗号: "  " → ","
+      .replace(/(")\s+(")/g, '$1,$2')
+      // 连续逗号: ,,,,, → ,
+      .replace(/,{2,}/g, ',')
+      // 开头逗号: [, 或 {,
+      .replace(/([\[{])\s*,/g, '$1')
+      // 多余尾逗号（再次清理）
+      .replace(/,\s*([}\]])/g, '$1')
+      // 缺失冒号: "key" "value" 或 "key" value
+      .replace(/"(\w+)"\s+"([^"]*)"/g, '"$1": "$2"')
+      // 单引号键/值（某些模型会混用）
+      .replace(/'/g, '"')
+
+    // 修复后重新确定边界
+    const fb = fixed.indexOf('[')
+    const lb = fixed.lastIndexOf(']')
+    const fbk = fixed.indexOf('{')
+    const lbk = fixed.lastIndexOf('}')
+
+    if (fb !== -1 && lb !== -1 && lb > fb && (fbk === -1 || fb < fbk)) {
+      fixed = fixed.substring(fb, lb + 1)
+    } else if (fbk !== -1 && lbk !== -1 && lbk > fbk) {
+      fixed = fixed.substring(fbk, lbk + 1)
+    }
+
+    return JSON.parse(fixed)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 多层级 JSON 提取 + 修复引擎
+ *
+ * 针对 AI 蓝图输出的常见问题逐层处理：
+ * 1. 提取 markdown ```json 代码块
+ * 2. 清洗不可解析的控制字符
+ * 3. 委托 robustParseJSON 修复 + 解析
+ * 4. 兜底：逐对象提取（从混乱输出中捞取每个有效 {chapterNumber: N, ...} 对象）
+ *
+ * @returns { parsed, repaired } — parsed 是解析结果，repaired 表示是否经过了修复
+ */
+export function extractAndRepairJSON(
+  text: string,
+  preferArray: boolean = false,
+): { parsed: unknown | null; repaired: boolean } {
+  if (!text) return { parsed: null, repaired: false }
+
+  let content = text
+  let repaired = false
+
+  // ====== Layer 1: 提取 markdown 代码块 ======
+  // 支持 ```json ... ``` 和 ``` ... ``` 两种形式
+  const codeBlockMatch = content.match(/```(?:json)?\s*\n?([\s\S]*?)```/)
+  if (codeBlockMatch) {
+    content = codeBlockMatch[1].trim()
+    repaired = true
+  }
+
+  // ====== Layer 2: 清洗不可解析字符 ======
+  const sanitized = sanitizeJSONText(content)
+  if (sanitized !== content) {
+    content = sanitized
+    repaired = true
+  }
+
+  // ====== Layer 3: 委托 robustParseJSON ======
+  let result = robustParseJSON(content, preferArray)
+  if (result !== null) {
+    return { parsed: result, repaired }
+  }
+
+  // ====== Layer 4: 兜底 — 逐对象提取 ======
+  // 当整个 JSON 结构损坏时，尝试提取每个独立的 { ... } 对象
+  // 只保留包含 chapterNumber 字段的对象（蓝图标配字段）
+  const objects = extractIndividualObjects(content)
+  if (objects.length > 0) {
+    // 检查是否有蓝图特征字段
+    const blueprintObjects = objects.filter(obj =>
+      obj && typeof obj === 'object' && (
+        'chapterNumber' in (obj as Record<string, unknown>) ||
+        'chapter_number' in (obj as Record<string, unknown>)
+      )
+    )
+    if (blueprintObjects.length > 0) {
+      return { parsed: blueprintObjects, repaired: true }
+    }
+    // 没有蓝图特征，但至少有对象，返回所有对象
+    return { parsed: objects, repaired: true }
+  }
+
+  return { parsed: null, repaired: false }
+}
+
+/** 清洗 JSON 文本中的不可解析字符 */
+function sanitizeJSONText(text: string): string {
+  return text
+    // BOM 头
+    .replace(/^﻿/, '')
+    // 控制字符（保留 \n \r \t）
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    // 中文引号 → 英文引号（AI 偶尔混用）
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    // 全角逗号/冒号 → 半角
+    .replace(/，/g, ',')
+    .replace(/：/g, ':')
+    // 不可见零宽字符
+    .replace(/[​-‏﻿]/g, '')
+    // 连续空白行
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/**
+ * 从混乱文本中逐个提取 { ... } 对象
+ * 使用括号匹配确保正确提取嵌套对象
+ */
+function extractIndividualObjects(text: string): Array<Record<string, unknown>> {
+  const results: Array<Record<string, unknown>> = []
+  const starts: number[] = []
+
+  // 找到所有顶级 { 的位置
+  let depth = 0
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '{') {
+      if (depth === 0) starts.push(i)
+      depth++
+    } else if (text[i] === '}') {
+      depth--
+      if (depth === 0 && starts.length > 0) {
+        const start = starts.pop()!
+        const objStr = text.substring(start, i + 1)
+        try {
+          // 尝试修复后解析
+          const fixed = objStr
+            .replace(/,(\s*})/g, '$1')
+            .replace(/'/g, '"')
+          const parsed = JSON.parse(fixed)
+          if (parsed && typeof parsed === 'object') {
+            results.push(parsed as Record<string, unknown>)
+          }
+        } catch {
+          // 单个对象解析失败，跳过
+        }
+      }
+    }
+  }
+
+  return results
+}
+
 // ===== 通用重试包装器 =====
 
 /**

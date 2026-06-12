@@ -33,6 +33,8 @@ export function initProjectDatabase(projectPath: string): void {
 /** 关闭项目数据库 */
 export function closeProjectDatabase(): void {
   if (projectDb) {
+    // WAL checkpoint — 将 WAL 日志合并回主数据库，防止 WAL 文件无限增长
+    try { projectDb.pragma('wal_checkpoint(TRUNCATE)') } catch { /* 忽略 */ }
     projectDb.close()
     projectDb = null
   }
@@ -43,7 +45,19 @@ export function getProjectDb(): BetterSqlite3.Database | null {
   return projectDb
 }
 
-/** 创建完整表结构（9 张核心表 + 2 张沿用表） */
+// ===== Schema 版本管理 =====
+/** 当前数据库 schema 版本号 */
+const CURRENT_SCHEMA_VERSION = 1
+
+/** 检查并执行 schema 迁移（仅在版本号低于当前版本时运行） */
+function ensureSchemaVersion(db: BetterSqlite3.Database): void {
+  const currentVersion = db.pragma('user_version', { simple: true }) as number
+  if (currentVersion >= CURRENT_SCHEMA_VERSION) return
+
+  console.log(`[Vela DB] Schema 迁移: v${currentVersion} → v${CURRENT_SCHEMA_VERSION}`)
+  migrateExistingTables(db)
+  db.pragma(`user_version = ${CURRENT_SCHEMA_VERSION}`)
+}
 function createTables(db: BetterSqlite3.Database) {
   db.exec(`
     -- ============================================================
@@ -127,7 +141,8 @@ function createTables(db: BetterSqlite3.Database) {
     CREATE TABLE IF NOT EXISTS contents (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       body TEXT NOT NULL DEFAULT '',              -- 正文/报告内容
-      created_at TEXT DEFAULT (datetime('now'))
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
     );
 
     -- ============================================================
@@ -135,7 +150,7 @@ function createTables(db: BetterSqlite3.Database) {
     -- ============================================================
     CREATE TABLE IF NOT EXISTS drafts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      chapter_number INTEGER NOT NULL,            -- 归属章节
+      chapter_number INTEGER NOT NULL,            -- 归属章节（与 blueprints 松散关联，导入时先于蓝图创建）
       version INTEGER NOT NULL,                   -- v1, v2...
       status TEXT DEFAULT 'draft',                -- draft/revised/finalized/archived
       source TEXT DEFAULT 'write',                -- write/rewrite
@@ -146,6 +161,7 @@ function createTables(db: BetterSqlite3.Database) {
       FOREIGN KEY (content_id) REFERENCES contents(id) ON DELETE RESTRICT
     );
     CREATE INDEX IF NOT EXISTS idx_drafts_chapter ON drafts(chapter_number);
+    -- 注：chapter_number 与 blueprints 无硬 FK，因导入流程先建草稿后推演蓝图
 
     -- ============================================================
     -- 6. revisions — 修稿（派生自 draft）
@@ -209,7 +225,8 @@ function createTables(db: BetterSqlite3.Database) {
       attempt_count INTEGER DEFAULT 0,
       completed_at TEXT DEFAULT '',
       last_attempt_at TEXT DEFAULT '',
-      FOREIGN KEY (run_id) REFERENCES post_process_runs(id) ON DELETE CASCADE
+      FOREIGN KEY (run_id) REFERENCES post_process_runs(id) ON DELETE CASCADE,
+      UNIQUE(run_id, step_key)
     );
 
     -- ============================================================
@@ -241,5 +258,37 @@ function createTables(db: BetterSqlite3.Database) {
 
     -- 索引
     CREATE INDEX IF NOT EXISTS idx_llm_calls_time ON llm_calls(created_at);
+    CREATE INDEX IF NOT EXISTS idx_summary_chapter ON summary_snapshots(chapter_number);
+    CREATE INDEX IF NOT EXISTS idx_summary_created ON summary_snapshots(created_at);
   `)
+
+  // ===== 旧表迁移（仅在新版本时执行） =====
+  ensureSchemaVersion(db)
+}
+
+/** 为已存在的旧表补加缺失的列/约束（兼容性迁移） */
+function migrateExistingTables(db: BetterSqlite3.Database) {
+  // 1. contents 表：补加 updated_at 列
+  try {
+    const cols = db.pragma('table_info(contents)') as Array<{ name: string }>
+    if (!cols.some(c => c.name === 'updated_at')) {
+      db.exec("ALTER TABLE contents ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))")
+      console.log('[Vela DB] 迁移: contents 表已添加 updated_at 列')
+    }
+  } catch { /* 忽略 */ }
+
+  // 2. post_process_steps 表：补加唯一约束（SQLite 不支持 ALTER ADD CONSTRAINT，用唯一索引代替）
+  try {
+    const indexes = db.pragma('index_list(post_process_steps)') as Array<{ name: string }>
+    if (!indexes.some(i => i.name === 'uq_post_steps_run_key')) {
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS uq_post_steps_run_key ON post_process_steps(run_id, step_key)')
+      console.log('[Vela DB] 迁移: post_process_steps 已添加唯一约束')
+    }
+  } catch { /* 忽略 */ }
+
+  // 3. summary_snapshots 表：补加索引
+  try {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_summary_chapter ON summary_snapshots(chapter_number)')
+    db.exec('CREATE INDEX IF NOT EXISTS idx_summary_created ON summary_snapshots(created_at)')
+  } catch { /* 忽略 */ }
 }

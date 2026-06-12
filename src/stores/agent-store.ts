@@ -403,6 +403,7 @@ export const useAgentStore = create<AgentState>()((set, get) => ({
 
       // LLM 生成函数（封装为非流式调用，Agent 专用参数）
       const generateFn = async (messages: LLMMessage[], mid: string): Promise<string> => {
+        const startTime = Date.now()
         const request = {
           modelId: mid,
           messages: messages.map(m => ({ role: m.role, content: m.content })),
@@ -410,7 +411,25 @@ export const useAgentStore = create<AgentState>()((set, get) => ({
           temperature: 0.7,    // 创作场景适度随机
         }
         const response = await (window as unknown as { velaAPI: { invoke: (ch: string, ...args: unknown[]) => Promise<unknown> } }).velaAPI.invoke('llm:generate', request)
-        const res = response as { success: boolean; content: string; error?: string }
+        const res = response as { success: boolean; content: string; error?: string; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } }
+
+        // 记录 LLM 调用日志
+        const model = llmStore.models.find(m => m.id === mid)
+        const duration = Date.now() - startTime
+        try {
+          await (window as unknown as { velaAPI: { invoke: (ch: string, ...args: unknown[]) => Promise<unknown> } }).velaAPI.invoke('db:log-llm-call', {
+            model_id: mid,
+            model_name: model?.name ?? model?.modelName ?? '',
+            purpose: 'agent',
+            prompt_tokens: res.usage?.promptTokens ?? 0,
+            completion_tokens: res.usage?.completionTokens ?? 0,
+            total_tokens: res.usage?.totalTokens ?? 0,
+            duration_ms: duration,
+            success: res.success ? 1 : 0,
+            error_message: res.error ?? '',
+          })
+        } catch { /* 日志失败不影响主流程 */ }
+
         if (!res.success) {
           throw new Error(res.error ?? 'LLM 生成失败')
         }

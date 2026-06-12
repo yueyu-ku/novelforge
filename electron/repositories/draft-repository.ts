@@ -159,6 +159,16 @@ export class DraftRepository {
         return row?.maxChapter ?? 0
     }
 
+    /** 获取所有有草稿的章节号（去重、升序） */
+    static getAllChapterNumbers(): number[] {
+        const db = getProjectDb()
+        if (!db) return []
+        const rows = db.prepare(`
+            SELECT DISTINCT chapter_number as cn FROM drafts ORDER BY cn ASC
+        `).all() as Array<{ cn: number }>
+        return rows.map(r => r.cn)
+    }
+
     /** 更新草稿状态 */
     static updateStatus(id: number, status: string, wordCount?: number): void {
         const db = getProjectDb()

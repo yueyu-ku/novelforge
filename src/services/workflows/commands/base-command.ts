@@ -2,6 +2,8 @@ import type { WorkflowContext, StepCallbacks } from '../../../stores/workflow-st
 import { useLLMStore } from '../../../stores/llm-store'
 import { globalEventBus, EventPayloadMap } from '../../../shared/event-bus'
 import type { BasePromptBuilder } from '../../prompts/prompt-builder'
+import { ipc } from '../../ipc-client'
+import { robustParseJSON } from '../workflow-utils'
 
 export interface CommandExecuteParams {
   step: unknown
@@ -14,20 +16,24 @@ export interface CommandExecuteParams {
  * 将原本混乱的 workflow 闭包拆分为可独立测试、状态解耦的命令单元。
  */
 export abstract class BaseWorkflowCommand<TResult = string> {
-  
+
   /** 抽象执行入口 */
   abstract execute(params: CommandExecuteParams): Promise<TResult>
 
   /** 获取 LLM 大模型连接代理（支持取消） */
   protected async callLLM(
-    prompt: string, 
-    systemPrompt: string, 
+    prompt: string,
+    systemPrompt: string,
     callbacks: StepCallbacks,
     options?: { responseFormat?: { type: string }; thinking?: boolean },
     context?: WorkflowContext
   ): Promise<string> {
     const llmStore = useLLMStore.getState()
     if (!llmStore.defaultModelId) throw new Error('未配置默认 AI 模型')
+
+    const modelId = llmStore.defaultModelId
+    const model = llmStore.models.find(m => m.id === modelId)
+    const startTime = Date.now()
 
     callbacks.setProgress(10)
 
@@ -42,7 +48,7 @@ export abstract class BaseWorkflowCommand<TResult = string> {
           if (context.cancelled && streamRequestId) {
             clearInterval(cancelCheckTimer!)
             cancelCheckTimer = null
-            llmStore.cancelGeneration(streamRequestId).catch(() => {})
+            llmStore.cancelGeneration(streamRequestId).catch(() => { })
             reject(new Error('工作流已取消'))
           }
         }, 200)
@@ -53,6 +59,21 @@ export abstract class BaseWorkflowCommand<TResult = string> {
           clearInterval(cancelCheckTimer)
           cancelCheckTimer = null
         }
+      }
+
+      const logLLMCall = (success: boolean, errorMessage?: string) => {
+        const duration = Date.now() - startTime
+        ipc.invoke('db:log-llm-call', {
+          model_id: modelId,
+          model_name: model?.name ?? model?.modelName ?? '',
+          purpose: 'workflow',
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0,
+          duration_ms: duration,
+          success: success ? 1 : 0,
+          error_message: errorMessage ?? '',
+        }).catch(() => { /* 日志失败不影响主流程 */ })
       }
 
       llmStore.generateStream(
@@ -67,12 +88,28 @@ export abstract class BaseWorkflowCommand<TResult = string> {
             fullContent += chunk
             callbacks.appendText(chunk)
           },
-          onDone: (text) => {
+          onDone: (text, usage) => {
             cleanup()
             // 取消后不 resolve，让 reject 生效
             if (context?.cancelled) {
+              logLLMCall(false, '工作流已取消')
               reject(new Error('工作流已取消'))
               return
+            }
+            // 更新 token 用量（如果 provider 提供了 usage）
+            if (usage) {
+              ipc.invoke('db:log-llm-call', {
+                model_id: modelId,
+                model_name: model?.name ?? model?.modelName ?? '',
+                purpose: 'workflow',
+                prompt_tokens: usage.promptTokens,
+                completion_tokens: usage.completionTokens,
+                total_tokens: usage.totalTokens,
+                duration_ms: Date.now() - startTime,
+                success: 1,
+              }).catch(() => { })
+            } else {
+              logLLMCall(true)
             }
             callbacks.setProgress(90)
             const raw = text || fullContent
@@ -81,6 +118,7 @@ export abstract class BaseWorkflowCommand<TResult = string> {
           },
           onError: (err) => {
             cleanup()
+            logLLMCall(false, err || '流式生成失败')
             reject(new Error(err || '流式生成失败'))
           }
         },
@@ -90,12 +128,14 @@ export abstract class BaseWorkflowCommand<TResult = string> {
         streamRequestId = reqId
         // 如果在 generateStream 返回前已经取消
         if (context?.cancelled) {
-          llmStore.cancelGeneration(reqId).catch(() => {})
+          llmStore.cancelGeneration(reqId).catch(() => { })
           cleanup()
+          logLLMCall(false, '工作流已取消')
           reject(new Error('工作流已取消'))
         }
       }).catch(err => {
         cleanup()
+        logLLMCall(false, String(err))
         reject(err)
       })
     })
@@ -123,28 +163,20 @@ export abstract class BaseWorkflowCommand<TResult = string> {
 
   /**
    * 全局容错 JSON 解析器
-   * 自动剥离 Markdown ```json 代码块并处理尾随逗号等常见大模型幻觉
+   * 复用 workflow-utils 中的健壮解析逻辑，统一处理 AI 输出格式错误
    */
   protected parseJSON<T>(text: string): T {
-    try {
-      // 1. 剥离 Markdown 块
-      let cleanText = text.replace(/```json?\n?/gi, '').replace(/```\n?/gi, '').trim()
-      // 2. 如果存在前序引导语，截取第一把括号到最后一把括号
-      const firstBrace = cleanText.indexOf('{')
-      const firstBracket = cleanText.indexOf('[')
-      const lastBrace = cleanText.lastIndexOf('}')
-      const lastBracket = cleanText.lastIndexOf(']')
+    // 先尝试对象解析（AI 通常返回 JSON 对象），再尝试数组
+    let result = robustParseJSON(text, false)
+    if (!result) {
+      result = robustParseJSON(text, true)
+    }
 
-      if (firstBrace !== -1 && lastBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
-        cleanText = cleanText.substring(firstBrace, lastBrace + 1)
-      } else if (firstBracket !== -1 && lastBracket !== -1) {
-        cleanText = cleanText.substring(firstBracket, lastBracket + 1)
-      }
-      
-      return JSON.parse(cleanText) as T
-    } catch {
+    if (result === null) {
       throw new Error(`AI 返回的数据格式乱码，无法解析为有效层级结构。尝试解析内容末端: ${text.slice(-100)}`)
     }
+
+    return result as T
   }
 
   /**

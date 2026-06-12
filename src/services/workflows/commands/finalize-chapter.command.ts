@@ -34,6 +34,25 @@ async function callLLMForPostProcess(
   const llmStore = useLLMStore.getState()
   if (!llmStore.defaultModelId) throw new Error('未配置默认 AI 模型')
 
+  const modelId = llmStore.defaultModelId
+  const model = llmStore.models.find(m => m.id === modelId)
+  const startTime = Date.now()
+
+  const logLLMCall = (success: boolean, errorMessage?: string) => {
+    const duration = Date.now() - startTime
+    ipc.invoke('db:log-llm-call', {
+      model_id: modelId,
+      model_name: model?.name ?? model?.modelName ?? '',
+      purpose: 'post_process',
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+      duration_ms: duration,
+      success: success ? 1 : 0,
+      error_message: errorMessage ?? '',
+    }).catch(() => { })
+  }
+
   return new Promise<string>((resolve, reject) => {
     let fullContent = ''
     llmStore.generateStream(
@@ -43,11 +62,28 @@ async function callLLMForPostProcess(
       ],
       {
         onChunk: (chunk) => { fullContent += chunk; callbacks.appendText(chunk) },
-        onDone: (text) => {
+        onDone: (text, usage) => {
+          if (usage) {
+            ipc.invoke('db:log-llm-call', {
+              model_id: modelId,
+              model_name: model?.name ?? model?.modelName ?? '',
+              purpose: 'post_process',
+              prompt_tokens: usage.promptTokens,
+              completion_tokens: usage.completionTokens,
+              total_tokens: usage.totalTokens,
+              duration_ms: Date.now() - startTime,
+              success: 1,
+            }).catch(() => { })
+          } else {
+            logLLMCall(true)
+          }
           const raw = text || fullContent
           resolve(stripThinkingTags(raw))
         },
-        onError: (err) => reject(new Error(err || '流式生成失败')),
+        onError: (err) => {
+          logLLMCall(false, err || '流式生成失败')
+          reject(new Error(err || '流式生成失败'))
+        },
       },
       undefined,
       options,

@@ -6,7 +6,7 @@ import { ipc } from '../ipc-client'
 import type { NovelConfig } from '../../shared/ipc-channels'
 import type { CharacterData } from '../../../electron/repositories/character-repository'
 
-import { runPostProcessPipeline, type PostProcessStep, stripThinkingTags } from './workflow-utils'
+import { runPostProcessPipeline, stripThinkingTags } from './workflow-utils'
 
 // ==========================================
 // 1. 类型定义
@@ -180,13 +180,109 @@ export function getNarrativePOVLabel(pov: string): string {
 
 export const ARCH_CHARACTER_SCOPE = 'arch_characters'
 
-export function createCharacterExtractSteps(_projectPath: string, characterDynamicsContent: string, genre: string): PostProcessStep[] {
+/**
+ * 从 AI 返回的文本中直接提取角色数据（不依赖 JSON.parse）
+ * 解决 AI 生成 JSON 格式不稳定的根本问题
+ *
+ * 支持格式：
+ * - 标准 JSON 数组：[{...}, {...}]
+ * - 包裹格式：{ "characters": [...] }
+ * - 半结构化文本：每个角色从 "name" 字段开始
+ */
+function extractCharactersFromText(text: string): Array<Record<string, unknown>> {
+  // 1. 找出所有 { ... } 对象块
+  const objects: string[] = []
+  let depth = 0
+  let start = -1
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '{') {
+      if (depth === 0) start = i
+      depth++
+    } else if (text[i] === '}') {
+      depth--
+      if (depth === 0 && start !== -1) {
+        objects.push(text.substring(start, i + 1))
+        start = -1
+      }
+    }
+  }
+
+  if (objects.length === 0) {
+    // 降级：尝试用正则直接提取字段名-值对
+    return extractByNamePattern(text)
+  }
+
+  const results: Array<Record<string, unknown>> = []
+
+  for (const obj of objects) {
+    // 跳过太短的对象（可能不是角色数据）
+    if (obj.length < 20) continue
+
+    const card = extractFieldsFromJsonLike(obj)
+    if (card && card.name) {
+      results.push(card)
+    }
+  }
+
+  return results.length > 0 ? results : extractByNamePattern(text)
+}
+
+/**
+ * 从类 JSON 对象字符串中提取字段（容错模式）
+ * 使用正则逐个匹配 "field": value 对，容忍格式错误
+ */
+function extractFieldsFromJsonLike(objStr: string): Record<string, unknown> | null {
+  const card: Record<string, unknown> = {}
+
+  // 匹配 "name": "value" 的键值对（支持值中带转义引号）
+  const kvPattern = /"(\w+)":\s*"((?:[^"\\]|\\.)*)"/g
+  let match: RegExpExecArray | null
+  while ((match = kvPattern.exec(objStr)) !== null) {
+    card[match[1]] = match[2].replace(/\\"/g, '"').replace(/\\n/g, '\n')
+  }
+
+  // 也匹配 "name" 后面缺冒号时用空格分隔的模式
+  if (!card.name) {
+    const nameMatch = objStr.match(/"name"\s*[:=]\s*"([^"]+)"/)
+    if (nameMatch) card.name = nameMatch[1]
+  }
+
+  return card.name ? card : null
+}
+
+/**
+ * 降级方案：当无法找到 JSON 对象结构时，直接用 "name" 关键字分割文本
+ */
+function extractByNamePattern(text: string): Array<Record<string, unknown>> {
+  // 按 "name": 或 "name" : 分割
+  const parts = text.split(/"name"\s*:\s*"/)
+  const results: Array<Record<string, unknown>> = []
+
+  for (let i = 1; i < parts.length; i++) {
+    const part = parts[i]
+    const nameEnd = part.indexOf('"')
+    if (nameEnd === -1) continue
+    const name = part.substring(0, nameEnd)
+
+    const card: Record<string, unknown> = { name }
+    const kvPattern = /"(\w+)":\s*"((?:[^"\\]|\\.)*)"/g
+    let m: RegExpExecArray | null
+    while ((m = kvPattern.exec(part)) !== null) {
+      if (m[1] !== 'name') card[m[1]] = m[2].replace(/\\"/g, '"').replace(/\\n/g, '\n')
+    }
+
+    if (card.name) results.push(card)
+  }
+
+  return results
+}
+export function createCharacterExtractSteps(_projectPath: string, characterDynamicsContent: string, genre: string) {
   return [
     {
       key: 'extract_character_cards',
       label: '📇 提取初始角色卡',
       critical: true,
-      executor: async (cb) => {
+      executor: async (cb: { appendText: (t: string) => void; log: (m: string) => void }) => {
         const { ArchitecturePromptBuilder } = await import('../prompts/prompt-builder')
         const template = getPromptTemplate('extract_initial_characters')
         if (!template) throw new Error('未找到 extract_initial_characters')
@@ -214,18 +310,22 @@ export function createCharacterExtractSteps(_projectPath: string, characterDynam
         })
 
         const cleanedCards = stripThinkingTags(fullContent)
-        const jsonStr = cleanedCards.replace(/```json?\n?/g, '').replace(/```/g, '').trim()
-        const parsedData = JSON.parse(jsonStr)
+        const rawText = cleanedCards.replace(/```json?\n?/g, '').replace(/```/g, '').trim()
 
-        // 兼容两种格式：直接数组 或 { characters: [...] }
-        const parsedCards: Array<Record<string, unknown>> = Array.isArray(parsedData)
-          ? parsedData
-          : (parsedData && typeof parsedData === 'object' && Array.isArray((parsedData as Record<string, unknown>).characters))
-            ? (parsedData as Record<string, unknown>).characters as Array<Record<string, unknown>>
-            : []
+        // 使用正则直接提取角色数据，避免 AI 格式不稳定的 JSON.parse
+        const parsedCards = extractCharactersFromText(rawText)
 
         if (parsedCards.length === 0) {
-          throw new Error('AI 返回的角色数据格式不正确，未提取到有效角色')
+          throw new Error('AI 返回的角色数据格式不正确，未提取到有效角色\n原始文本前200字: ' + rawText.slice(0, 200))
+        }
+
+        // 防御：AI 可能将文本字段生成为对象或数组，统一转为字符串
+        const stringifyField = (val: unknown): string => {
+          if (!val) return ''
+          if (typeof val === 'string') return val
+          if (Array.isArray(val)) return val.map(v => String(v)).join('、')
+          if (typeof val === 'object') return JSON.stringify(val, null, 2)
+          return String(val)
         }
 
         // 构建角色卡数据列表
@@ -234,11 +334,18 @@ export function createCharacterExtractSteps(_projectPath: string, characterDynam
         for (const card of parsedCards) {
           if (!card.name) continue
           const role = validRoles.includes(card.role as string) ? card.role : 'supporting'
-          characterDataList.push({ ...card, role, name: card.name })
+          const cleaned: Record<string, unknown> = { name: card.name, role }
+          for (const key of ['gender', 'age', 'appearance', 'personality', 'background', 'abilities', 'motivation', 'relationships', 'arc', 'notes']) {
+            if (card[key] !== undefined) cleaned[key] = stringifyField(card[key])
+          }
+          characterDataList.push(cleaned)
         }
 
         // 批量写入数据库
-        await ipc.invoke('db:character-save-all', characterDataList as unknown as CharacterData[])
+        const saveResult = await ipc.invoke('db:character-save-all', characterDataList as unknown as CharacterData[])
+        if (!saveResult.success) {
+          throw new Error(`角色卡保存失败: ${saveResult.error || '未知错误'}`)
+        }
         cb.log(`✅ 角色卡提取完毕（共 ${characterDataList.length} 个角色）`)
       },
     },
@@ -262,7 +369,16 @@ export function runArchCharacterExtract(projectPath: string, characterDynamicsCo
               // 角色卡提取成功 → 通过 EventBus 通知 ProjectService 刷新
               globalEventBus.emit('ARCH_POSTPROCESS_UPDATED', {})
             } else {
-              globalEventBus.emit('CHARACTER_EXTRACT_FAILED', { error: archStatus.steps.extract_character_cards?.error })
+              // 提取失败 → 记录详细错误日志
+              const failedStep = steps.find(s => {
+                const stepResult = archStatus.steps[s.key]
+                return stepResult && !stepResult.ok
+              })
+              const errMsg = failedStep
+                ? `${failedStep.label}: ${archStatus.steps[failedStep.key]?.error || '未知错误'}`
+                : '角色卡提取失败（原因未知）'
+              callbacks.log(`❌ ${errMsg}`)
+              globalEventBus.emit('CHARACTER_EXTRACT_FAILED', { error: errMsg })
               globalEventBus.emit('ARCH_POSTPROCESS_UPDATED', {})
             }
           },

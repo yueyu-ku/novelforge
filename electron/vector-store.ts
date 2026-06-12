@@ -63,6 +63,36 @@ export interface KBStats {
 const TABLE_NAME = 'chunks'
 const DOCS_TABLE_NAME = 'documents'
 
+/** 从第一个有效向量中检测维度；无向量时返回 0（表示纯 FTS 模式） */
+function detectVectorDim(records: ChunkRecord[]): number {
+  for (const r of records) {
+    if (r.vector && r.vector.length > 0) return r.vector.length
+  }
+  return 0
+}
+
+/** 构建包含可选向量列的 Arrow Schema */
+function buildChunksSchema(vectorDim: number): ArrowSchema {
+  const fields: Field[] = [
+    new Field('id', new Utf8()),
+    new Field('docId', new Utf8()),
+    new Field('fileName', new Utf8()),
+    new Field('chapterNumber', new Int32(), true),
+    new Field('chapterTitle', new Utf8(), true),
+    new Field('text', new Utf8()),
+  ]
+  // 仅在确实有向量数据时添加 FixedSizeList 列
+  if (vectorDim > 0) {
+    fields.push(new Field('vector', new ArrowFixedSizeList(vectorDim, new Field('item', new Float32())), true))
+  }
+  fields.push(
+    new Field('chunkIndex', new Int32()),
+    new Field('totalChunks', new Int32()),
+    new Field('importedAt', new Utf8()),
+  )
+  return new ArrowSchema(fields)
+}
+
 // ===== 连接池（按项目路径缓存） =====
 
 const connectionPool = new Map<string, lancedb.Connection>()
@@ -70,7 +100,7 @@ const connectionPool = new Map<string, lancedb.Connection>()
 /** 获取 LanceDB 连接（惰性创建） */
 export async function getConnection(projectPath: string): Promise<lancedb.Connection> {
   const dbPath = path.join(projectPath, '.vela', 'lancedb')
-  
+
   const cached = connectionPool.get(dbPath)
   if (cached) return cached
 
@@ -130,20 +160,8 @@ export async function addChunks(
 
     // 写入 chunks 表
     const tableNames = await db.tableNames()
-    const VECTOR_DIM = 2048
-    const vectorField = new Field('vector', new ArrowFixedSizeList(VECTOR_DIM, new Field('item', new Float32())), true)
-    const targetSchema = new ArrowSchema([
-      new Field('id', new Utf8()),
-      new Field('docId', new Utf8()),
-      new Field('fileName', new Utf8()),
-      new Field('chapterNumber', new Int32(), true),
-      new Field('chapterTitle', new Utf8(), true),
-      new Field('text', new Utf8()),
-      vectorField,
-      new Field('chunkIndex', new Int32()),
-      new Field('totalChunks', new Int32()),
-      new Field('importedAt', new Utf8()),
-    ])
+    const VECTOR_DIM = detectVectorDim(records)
+    const targetSchema = buildChunksSchema(VECTOR_DIM)
 
     if (tableNames.includes(TABLE_NAME)) {
       const table = await db.openTable(TABLE_NAME)
@@ -390,7 +408,9 @@ export async function getStats(projectPath: string): Promise<KBStats> {
       const vectorField = schema.fields.find(f => f.name === 'vector')
       if (vectorField) {
         hasVectors = true
-        vectorDimension = 2048 // 向量维度（需与 Embedding 模型输出匹配）
+        // 从 FixedSizeList 类型中提取实际维度
+        const vecType = vectorField.type as { listSize?: number }
+        vectorDimension = vecType.listSize ?? 0
       }
     } catch { /* 忽略 */ }
 
@@ -473,7 +493,7 @@ export async function getChunksForBackfill(
         return len === 0
       })
     }
-    
+
     // 只返回一批
     return missing.slice(0, batchSize).map((r: { id: string; text: string; vector?: number[] }) => ({
       id: r.id,
@@ -564,7 +584,7 @@ export async function migrateFromJSON(
   projectPath: string,
 ): Promise<{ success: boolean; migrated: number; error?: string }> {
   const jsonPath = path.join(projectPath, '.vela', 'vectors.json')
-  
+
   if (!fs.existsSync(jsonPath)) {
     return { success: true, migrated: 0 }
   }
@@ -595,10 +615,10 @@ export async function migrateFromJSON(
     for (const [docId, entries] of docMap) {
       const docInfo = store.documents.find(d => d.id === docId)
       const fileName = docInfo?.fileName || entries[0]?.meta?.fileName || 'unknown'
-      
+
       const chunks = entries.map(e => e.text)
       const vectors = entries.map(e => e.vector).filter(v => v && v.length > 0)
-      
+
       await addChunks(
         projectPath,
         docId,
@@ -613,7 +633,7 @@ export async function migrateFromJSON(
     // 迁移完成，重命名旧文件
     fs.renameSync(jsonPath, jsonPath + '.migrated')
     console.log(`[Vela VectorStore] 迁移完成：${migrated} 个块已写入 LanceDB`)
-    
+
     return { success: true, migrated }
   } catch (error) {
     console.error('[Vela VectorStore] 迁移失败:', error)

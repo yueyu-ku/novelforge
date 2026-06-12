@@ -242,6 +242,7 @@ export interface DatabaseChannels {
   'db:blueprint-upsert': { args: [data: BlueprintData]; return: { success: boolean; error?: string } }
   'db:blueprint-upsert-many': { args: [items: BlueprintData[]]; return: { success: boolean; error?: string } }
   'db:blueprint-update-notes': { args: [chapterNumber: number, notes: string]; return: { success: boolean; error?: string } }
+  'db:blueprint-delete': { args: [chapterNumber: number]; return: { success: boolean; error?: string } }
 
   // 3. characters
   'db:character-get-all': { args: []; return: CharacterData[] }
@@ -258,6 +259,7 @@ export interface DatabaseChannels {
   'db:draft-get-latest': { args: [chapterNumber: number]; return: DraftMeta | null }
   'db:draft-get-finalized': { args: [chapterNumber: number]; return: DraftMeta | null }
   'db:draft-get-max-finalized-chapter': { args: []; return: number }
+  'db:draft-get-all-chapter-numbers': { args: []; return: number[] }
   'db:draft-next-version': { args: [chapterNumber: number]; return: number }
   'db:draft-update-status': { args: [id: number, status: string, wordCount?: number]; return: { success: boolean; error?: string } }
   'db:draft-update-content': { args: [id: number, content: string, wordCount: number]; return: { success: boolean; error?: string } }
