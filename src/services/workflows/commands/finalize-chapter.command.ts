@@ -265,8 +265,27 @@ export function buildFinalizePostProcessSteps(
     })
   }
 
+  // 步骤 3.2: 伏笔扫描
+  const voiceIdx = steps.length - (chapterNumber % 5 === 0 ? 2 : 1)
+  steps.splice(voiceIdx, 0, {
+    key: 'foreshadowing_scan',
+    label: '🔮 伏笔扫描',
+    critical: false,
+    executor: async (callbacks: StepCallbacks) => {
+      try {
+        const { scanNewForeshadowing, detectResolvedForeshadowing, loadAllForeshadowing, saveForeshadowing } = await import('../../foreshadowing-manager')
+        const all = await loadAllForeshadowing()
+        const news = scanNewForeshadowing(draftContent, chapterNumber)
+        const done = detectResolvedForeshadowing(draftContent, all, chapterNumber)
+        const merged = [...all.filter(i => !done.some(d => d.id === i.id)), ...news]
+        await saveForeshadowing(merged)
+        if (news.length) callbacks.log(`新增${news.length}伏笔/回收${done.length}旧伏笔`)
+      } catch (e) { callbacks.log(`⚠️ 伏笔扫描失败: ${String(e)}`) }
+    },
+  })
+
   // 步骤 3.5: 角色声音分析
-  steps.splice(steps.length - (chapterNumber % 5 === 0 ? 2 : 1), 0, {
+  steps.splice(voiceIdx + 1, 0, {
     key: 'voice_analysis',
     label: '🎤 角色声音分析',
     critical: false,

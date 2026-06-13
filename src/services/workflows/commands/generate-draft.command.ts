@@ -92,7 +92,19 @@ export class GenerateDraftCommand extends BaseWorkflowCommand {
         // ---- 缓存失效区（逐章变化）----
         .withPreviousEnding(previousEnding || '（无前文）')
         .withChapterInfo(this.chapterInfo)
+
+      // 过渡引擎：构建前章场景卡片
+      let transitionContext = ''
+      try {
+        const { buildTransitionContext, formatTransitionForPrompt } = await import('../../chapter-transition-engine')
+        const ctx = await buildTransitionContext(this.chapterInfo.chapterNumber)
+        transitionContext = formatTransitionForPrompt(ctx)
+        if (transitionContext) callbacks.log('  已构建章节过渡上下文')
+      } catch { /* 不影响主流程 */ }
+
+      promptBuilder
         .withFutureBlueprints(futureBlueprintsStr)
+        .withUserGuidance((this.chapterInfo.userGuidance || '') + '\n\n' + transitionContext)
         .withFilteredContext(filteredContext)
         .withShortSummary('')
         .withUserGuidance(this.chapterInfo.userGuidance?.trim() || '（无微操指导）')
