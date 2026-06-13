@@ -70,9 +70,9 @@ const HEADER_ALIASES: Record<string, string> = {
 export function parseMarkdownTable(text: string): Array<Record<string, string>> | null {
   if (!text) return null
 
-  // 1. 尝试提取 markdown 代码块内的表格
+  // 1. 尝试提取 markdown 代码块内的表格（支持多种代码块格式）
   let content = text
-  const codeBlockMatch = content.match(/```(?:markdown|md)?\s*\n?([\s\S]*?)```/)
+  const codeBlockMatch = content.match(/```(?:markdown|md|table)?\s*\n?([\s\S]*?)```/)
   if (codeBlockMatch) {
     content = codeBlockMatch[1].trim()
   }
@@ -80,8 +80,7 @@ export function parseMarkdownTable(text: string): Array<Record<string, string>> 
   // 2. 规范化换行符
   const lines = content.split(/\r?\n/)
 
-  // 3. 找到分隔行（|---|...|）
-  // 匹配模式：以 | 开头，包含 - 和 | 的混合（允许 :--- 对齐语法）
+  // 3. 找到分隔行（更宽松的匹配：|----|----| 或 |:---|:---:| 等变体）
   const separatorLineRegex = /^\s*\|[\s\-:]+\|[\s\-:|]+\s*$/
   let separatorIdx = -1
   for (let i = 0; i < lines.length; i++) {
@@ -91,17 +90,26 @@ export function parseMarkdownTable(text: string): Array<Record<string, string>> 
     }
   }
 
-  if (separatorIdx < 1) return null // 没有分隔行，或分隔行是第一行（无 header）
+  // 备用：如果标准分隔符没找到，尝试找第一个同时包含 | 和 --- 的行
+  if (separatorIdx < 0) {
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i].includes('|') && lines[i].includes('---')) {
+        separatorIdx = i
+        break
+      }
+    }
+  }
+
+  if (separatorIdx < 1) return null
 
   // 4. 解析表头（分隔行上一行）
   const headerLine = lines[separatorIdx - 1]
   const headers = splitTableRow(headerLine)
-  if (headers.length < 2) return null // 至少需要 2 列
+  if (headers.length < 2) return null
 
-  // 将表头映射到标准字段名
+  // 将表头映射到标准字段名，未匹配的保留原名
   const fieldMap: string[] = headers.map(h => {
     const normalized = h.trim()
-    // 先精确匹配，再尝试小写匹配
     return HEADER_ALIASES[normalized] || HEADER_ALIASES[normalized.toLowerCase()] || normalized
   })
 
@@ -111,41 +119,42 @@ export function parseMarkdownTable(text: string): Array<Record<string, string>> 
 
   for (let i = separatorIdx + 1; i < lines.length; i++) {
     const line = lines[i]
-
-    // 跳过空行和非表格行
     if (!line.trim()) continue
     if (!dataRowRegex.test(line)) {
-      // 如果连续多行都不是表格行，说明表格已结束
       if (rows.length > 0) break
       continue
     }
 
     const cells = splitTableRow(line)
-
-    // 构建行对象
     const row: Record<string, string> = {}
     let hasContent = false
-    for (let j = 0; j < fieldMap.length && j < cells.length; j++) {
+
+    // 动态列处理：遍历所有 cells，超出 fieldMap 的列用 "col_N" 命名
+    // 如果 cells 比 fieldMap 多，从 headerLine 重新解析获取完整表头
+    const effectiveFields = cells.length > fieldMap.length
+      ? [...fieldMap, ...Array.from({ length: cells.length - fieldMap.length }, (_, k) => `col_${fieldMap.length + k + 1}`)]
+      : fieldMap
+
+    for (let j = 0; j < cells.length; j++) {
       const value = cells[j].trim()
       if (value) hasContent = true
-      row[fieldMap[j]] = value
+      if (j < effectiveFields.length) {
+        row[effectiveFields[j]] = value
+      }
     }
 
-    // 只有当行至少有一个非空值时才添加
-    if (hasContent) {
-      rows.push(row)
-    }
+    if (hasContent) rows.push(row)
   }
 
-  // 6. 验证：至少需要有一些有效的 chapterNumber
   if (rows.length === 0) return null
 
-  const hasChapterNumbers = rows.some(r => {
+  // 6. 放宽验证：检查是否有任何章节号或标题
+  const hasValidData = rows.some(r => {
     const v = r.chapterNumber
-    return v && !isNaN(Number(v)) && Number(v) > 0
+    return (v && !isNaN(Number(v)) && Number(v) > 0) || r.title?.trim()
   })
 
-  if (!hasChapterNumbers) return null
+  if (!hasValidData) return null
 
   return rows
 }
