@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0A1628"/>
+      <stop offset="100%" stop-color="#1a2a4a"/>
+    </linearGradient>
+    <linearGradient id="pen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7EC8E3"/>
+      <stop offset="100%" stop-color="#5B9ED6"/>
+    </linearGradient>
+    <linearGradient id="flame" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#9B8EC8"/>
+      <stop offset="100%" stop-color="#C9A76C"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 背景圆 -->
+  <circle cx="256" cy="256" r="240" fill="url(#bg)"/>
+
+  <!-- 几何菱形笔尖 -->
+  <polygon points="256,80 160,280 256,360 352,280" fill="url(#pen)" opacity="0.9"/>
+
+  <!-- 三角火焰/灵感 -->
+  <polygon points="256,100 200,220 256,200 312,220" fill="url(#flame)" opacity="0.85"/>
+
+  <!-- 底部几何底座 -->
+  <polygon points="200,350 256,420 312,350" fill="#5B9ED6" opacity="0.6"/>
+
+  <!-- 装饰线条 -->
+  <line x1="256" y1="220" x2="256" y2="350" stroke="#C9A76C" stroke-width="3" opacity="0.5"/>
+  <line x1="200" y1="280" x2="312" y2="280" stroke="#7EC8E3" stroke-width="2" opacity="0.4"/>
+</svg>

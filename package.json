@@ -1,8 +1,8 @@
 {
-  "name": "vela",
-  "version": "1.6.0",
-  "description": "Vela - AI 深度驱动的小说创作 IDE",
-  "author": "heider",
+  "name": "novelforge",
+  "version": "2.0.0",
+  "description": "NovelForge - AI 深度驱动的小说创作 IDE",
+  "author": "yueyu-ku",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.js",
