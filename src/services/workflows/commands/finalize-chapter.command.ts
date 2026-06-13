@@ -92,16 +92,6 @@ async function callLLMForPostProcess(
   })
 }
 
-/** 容错 JSON 解析（剥离 Markdown 代码块 + 自动截取有效 JSON 边界） */
-function parseJSON<T>(text: string): T {
-  let cleanText = text.replace(/```json?\n?/gi, '').replace(/```\n?/gi, '').trim()
-  const firstBrace = cleanText.indexOf('{')
-  const lastBrace = cleanText.lastIndexOf('}')
-  if (firstBrace !== -1 && lastBrace !== -1) {
-    cleanText = cleanText.substring(firstBrace, lastBrace + 1)
-  }
-  return JSON.parse(cleanText) as T
-}
 
 // ===== 后处理步骤构建器 =====
 
@@ -182,60 +172,68 @@ export function buildFinalizePostProcessSteps(
           .withChapterNumber(chapterNumber)
           .withExistingCardsJson(simpleCards)
 
-        const cardsResult = await callLLMForPostProcess(cardBuilder, callbacks, { responseFormat: { type: 'json_object' } })
-        type LLMUpdateState = {
-          location?: string
-          powerLevel?: string
-          physicalState?: string
-          mentalState?: string
-          keyItems?: string
-          recentEvents?: string
+        const cardsResult = await callLLMForPostProcess(cardBuilder, callbacks)
+
+        // 解析 Markdown 表格格式的角色状态更新（比 JSON 更稳定）
+        const { parseMarkdownTable } = await import('../workflow-utils')
+        const updSections = cardsResult.split(/###\s*(UPDATES|NEW)/i)
+        let updateRows: Array<Record<string, string>> = []
+        let newRows: Array<Record<string, string>> = []
+
+        for (let si = 0; si < updSections.length; si++) {
+          const label = updSections[si]?.trim().toUpperCase()
+          const content = updSections[si + 1] || ''
+          if (label === 'UPDATES') {
+            updateRows = parseMarkdownTable(content) || []
+          } else if (label === 'NEW') {
+            newRows = parseMarkdownTable(content) || []
+          }
+        }
+        // 如果没有分段，尝试整体解析
+        if (updateRows.length === 0 && newRows.length === 0) {
+          updateRows = parseMarkdownTable(cardsResult) || []
         }
 
-        const cardUpdates = parseJSON<{
-          updates?: Array<{ name: string; currentState: LLMUpdateState }>
-          newCharacters?: Array<{ name: string; role: string; currentState: LLMUpdateState }>
-        }>(cardsResult)
-
-        if (cardUpdates.updates && Array.isArray(cardUpdates.updates)) {
-          for (const upd of cardUpdates.updates) {
-            const dbChar = allChars.find((c) => c.name === upd.name)
-            if (dbChar && upd.currentState) {
-              const cs = upd.currentState
+        if (updateRows.length > 0) {
+          for (const row of updateRows) {
+            const name = row.name || ''
+            if (!name) continue
+            const dbChar = allChars.find((c) => c.name === name)
+            if (dbChar) {
               const dbCharState = (dbChar.currentState as Record<string, unknown>) || {}
               const newState = {
-                location: cs.location || (dbCharState.location as string) || '',
-                powerLevel: cs.powerLevel || (dbCharState.powerLevel as string) || '',
-                physicalState: cs.physicalState || (dbCharState.physicalState as string) || '',
-                mentalState: cs.mentalState || (dbCharState.mentalState as string) || '',
-                keyItems: cs.keyItems || (dbCharState.keyItems as string) || '',
-                recentEvents: cs.recentEvents || '',
+                location: row.location || (dbCharState.location as string) || '',
+                powerLevel: row.powerLevel || (dbCharState.powerLevel as string) || '',
+                physicalState: row.physicalState || (dbCharState.physicalState as string) || '',
+                mentalState: row.mentalState || (dbCharState.mentalState as string) || '',
+                keyItems: row.keyItems || (dbCharState.keyItems as string) || '',
+                recentEvents: row.recentEvents || '',
                 updatedAtChapter: chapterNumber,
               }
-              await ipc.invoke('db:character-update-state', upd.name, newState)
-              callbacks.log(`✅ 更新角色动态状态: ${dbChar.name}`)
+              await ipc.invoke('db:character-update-state', name, newState)
+              callbacks.log(`更新角色状态: ${name}`)
             }
           }
         }
 
-        if (cardUpdates.newCharacters && Array.isArray(cardUpdates.newCharacters)) {
+        if (newRows.length > 0) {
           let newCharCount = 0
-          for (const newChar of cardUpdates.newCharacters) {
-            if (allChars.some((c) => c.name === newChar.name)) continue
+          for (const row of newRows) {
+            const name = row.name || ''
+            if (!name || allChars.some((c) => c.name === name)) continue
             newCharCount++
-            const cs = newChar.currentState || {}
             await ipc.invoke('db:character-upsert', {
-              name: newChar.name,
-              role: newChar.role || 'supporting',
+              name: name,
+              role: row.role || 'supporting',
               gender: '', age: '', appearance: '', personality: '', background: '',
               abilities: '', motivation: '', relationships: '', arc: '', notes: '',
               currentState: {
-                location: cs.location || '',
-                powerLevel: cs.powerLevel || '',
-                physicalState: cs.physicalState || '',
-                mentalState: cs.mentalState || '',
-                keyItems: cs.keyItems || '',
-                recentEvents: cs.recentEvents || '',
+                location: row.location || '',
+                powerLevel: row.powerLevel || '',
+                physicalState: row.physicalState || '',
+                mentalState: row.mentalState || '',
+                keyItems: row.keyItems || '',
+                recentEvents: row.recentEvents || '',
                 updatedAtChapter: chapterNumber,
               }
             })

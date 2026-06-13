@@ -63,7 +63,7 @@ export class ReviewChapterCommand extends BaseWorkflowCommand<string> {
     const reviewResultRaw = await this.callLLMWithBuilder(
       promptBuilder,
       callbacks,
-      { responseFormat: { type: 'json_object' } }
+      { }
     )
 
     const reviewResultClean = this.stripThinkingTags(reviewResultRaw)
@@ -75,12 +75,24 @@ export class ReviewChapterCommand extends BaseWorkflowCommand<string> {
 
     const revIndex = await ipc.invoke('db:review-next-index', baseDraft.id)
 
-    let parsedResult
-    try {
-      parsedResult = this.parseJSON(reviewResultClean)
-    } catch {
+    // 解析审稿结果（Markdown 表格格式，比 JSON 更稳定）
+    const { parseMarkdownTable } = await import('../workflow-utils')
+    const tableRows = parseMarkdownTable(reviewResultClean)
+    let parsedResult: { items?: Array<Record<string, string>>; summary?: string }
+    if (tableRows && tableRows.length > 0) {
+      parsedResult = {
+        items: tableRows.map(r => ({
+          category: r.category || '',
+          severity: r.severity || 'pass',
+          quote: r.quote || '',
+          description: r.description || '',
+        })),
+        summary: `审稿完成，共 ${tableRows.length} 项检查`,
+      }
+      callbacks.log(`✅ Markdown 表格解析成功: ${tableRows.length} 条审稿记录`)
+    } else {
       callbacks.log('⚠️ 审稿结果解析失败，返回原始文本')
-      parsedResult = { summary: '解析失败', items: [] }
+      parsedResult = { summary: '解析失败（非表格格式）', items: [] }
     }
 
     await ipc.invoke('db:review-create', {
