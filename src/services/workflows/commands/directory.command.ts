@@ -2,7 +2,8 @@ import { BaseWorkflowCommand, CommandExecuteParams } from './base-command'
 import { useProjectStore } from '../../../stores/project-store'
 import { getPromptTemplate } from '../../prompt-templates'
 import { DirectoryPromptBuilder } from '../../prompts/prompt-builder'
-import { DirectoryWorkflowParams, ChapterBlueprint, parseTextBlueprints, saveAllBlueprints } from '../directory-workflow'
+import { DirectoryWorkflowParams, ChapterBlueprint, parseTextBlueprints, parseTextBlueprintsFromParsed, saveAllBlueprints } from '../directory-workflow'
+import { stripThinkingTags, extractAndRepairJSON } from '../workflow-utils'
 
 /**
  * 为 Prompt 注入清洗蓝图内容：
@@ -58,8 +59,9 @@ export class GenerateDirectoryCommand extends BaseWorkflowCommand<ChapterBluepri
     const newBlueprints: ChapterBlueprint[] = []
     // 使用游标追踪生成进度，支持 AI 超额返回时智能跳过后续批次
     let cursor = startChapter
+    // 多级重试策略：本地修复 → 中批次(5章) → 单章
     let consecutiveParseFailures = 0
-    const MAX_CONSECUTIVE_FAILURES = 5
+    const MAX_CONSECUTIVE_FAILURES = 5  // 增加容错次数（修复不算新 LLM 调用）
     // 动态批次大小
     let effectiveBatchSize = batchSize
 
@@ -127,7 +129,7 @@ export class GenerateDirectoryCommand extends BaseWorkflowCommand<ChapterBluepri
         useProjectStore.getState().refreshFileTree()
       }
 
-      // 计算本次实际生成到的最大章节号，推进游标
+      // 计算本次实际生成到的最大章节号，推进游标到已生成的最后一章之后
       if (parsed.length > 0) {
         consecutiveParseFailures = 0
         effectiveBatchSize = batchSize  // 恢复完整批次大小
@@ -145,12 +147,37 @@ export class GenerateDirectoryCommand extends BaseWorkflowCommand<ChapterBluepri
         consecutiveParseFailures++
         callbacks.log(`  ⚠️ 第 ${cursor}–${batchEnd} 章解析失败（连续 ${consecutiveParseFailures}/${MAX_CONSECUTIVE_FAILURES}）`)
 
-        // 降级策略：逐步缩小批次大小。parseTextBlueprints 内部会自动尝试
-        // Markdown 表格解析 → JSON fallback 两条路径，此处只需控制批次规模
-        if (consecutiveParseFailures <= 3) {
+        // 三级降级策略：本地修复（不消耗 Token）→ 缩小批次 → 单章兜底
+        // parseTextBlueprints 内部会自动尝试 Markdown 表格 → JSON fallback 两条路径
+        if (consecutiveParseFailures === 1) {
+          // 第 1 次失败：尝试更深层的本地 JSON 修复
+          callbacks.log(`  🔧 尝试本地修复 JSON（不消耗额外 Token）...`)
+          const repairResult = extractAndRepairJSON(stripThinkingTags(resultText), false)
+          if (repairResult.parsed) {
+            callbacks.log(`  ✅ 本地修复成功，提取到有效数据`)
+            const repairedBlueprints = parseTextBlueprintsFromParsed(repairResult.parsed, cursor, endChapter)
+            if (repairedBlueprints.length > 0) {
+              newBlueprints.push(...repairedBlueprints)
+              await saveAllBlueprints(repairedBlueprints)
+              useProjectStore.getState().refreshFileTree()
+              consecutiveParseFailures = 0
+              effectiveBatchSize = batchSize
+              const actualMaxChapter = Math.max(...repairedBlueprints.map(p => p.chapterNumber))
+              callbacks.log(`  ✅ 第 ${cursor}–${actualMaxChapter} 章完成（修复后 ${repairedBlueprints.length} 章）并已保存入库`)
+              cursor = actualMaxChapter + 1
+              continue
+            }
+          }
+          callbacks.log(`  ❌ 本地修复未能提取到有效蓝图数据`)
+          // 降级到 5 章小批次重试
+          effectiveBatchSize = Math.min(5, effectiveBatchSize)
+          callbacks.log(`  🔄 缩小为 ${effectiveBatchSize} 章/批，从第 ${cursor} 章重新生成...`)
+        } else if (consecutiveParseFailures === 2 || consecutiveParseFailures === 3) {
+          // 第 2-3 次失败：进一步缩小批次
           effectiveBatchSize = Math.max(1, Math.floor(effectiveBatchSize / 2))
-          callbacks.log(`  🔄 缩小为 ${effectiveBatchSize} 章/批，从第 ${cursor} 章重试...`)
+          callbacks.log(`  🔄 继续缩小为 ${effectiveBatchSize} 章/批，从第 ${cursor} 章重试...`)
         } else {
+          // 第 4-5 次失败：单章模式
           effectiveBatchSize = 1
           callbacks.log(`  🔄 单章模式重试第 ${cursor} 章...`)
         }
