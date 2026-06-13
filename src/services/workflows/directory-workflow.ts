@@ -32,12 +32,12 @@ export interface DirectoryWorkflowParams {
 }
 
 // ==========================================
-// 2. 蓝图文件访问与工具函数
+// 2. 蓝图解析与文件访问
 // ==========================================
 
 /**
  * 从已解析的 JSON 数据中提取蓝图数组并转换为 ChapterBlueprint[]
- * 供 parseTextBlueprints 和 directory.command 的修复重试路径共同使用
+ * 供 parseTextBlueprints 的 JSON fallback 路径使用
  */
 export function parseTextBlueprintsFromParsed(
   parsed: unknown,
@@ -46,7 +46,7 @@ export function parseTextBlueprintsFromParsed(
 ): ChapterBlueprint[] {
   const result: ChapterBlueprint[] = []
 
-  // 辅助：获取章节号（前置定义，后面提取阶段也需要用）
+  // 辅助：获取章节号
   const getChapterNum = (p: Record<string, unknown>): number => {
     const n = Number(p.chapterNumber ?? p.chapter_number ?? p.chapter ?? p.number ?? p.chapterNum ?? p.id ?? 0)
     return isNaN(n) ? 0 : n
@@ -67,19 +67,16 @@ export function parseTextBlueprintsFromParsed(
     return null
   }
 
-  // 1. 统一提取蓝图数组（支持多种 wrapper key 和嵌套结构）
+  // 统一提取蓝图数组（支持多种 wrapper key 和嵌套结构）
   let blueprintArray: unknown[] | null = null
 
   if (Array.isArray(parsed)) {
-    // ★ 检查数组元素是否直接是蓝图对象（有 chapterNumber），还是 wrapper 对象
     const firstItem = parsed[0]
     if (firstItem && typeof firstItem === 'object' && !Array.isArray(firstItem)) {
       const obj = firstItem as Record<string, unknown>
-      // 如果第一个元素有 chapterNumber，直接作为蓝图数组
       if (getChapterNum(obj) > 0) {
         blueprintArray = parsed
       } else {
-        // ★ 否则尝试从每个 wrapper 对象中提取 blueprints 数组并合并
         const allChapters: unknown[] = []
         for (const item of parsed) {
           if (item && typeof item === 'object' && !Array.isArray(item)) {
@@ -109,7 +106,7 @@ export function parseTextBlueprintsFromParsed(
     if (chNum < startNum || chNum > endNum) continue
 
     const chars = p.characters ?? p.characterList ?? p.character_list ?? []
-    // ★ 容错：AI 可能返回字符串 "角色A, 角色B" 而非数组
+    // 容错：AI 可能返回字符串 "角色A, 角色B" 而非数组
     let characterArray: string[]
     if (Array.isArray(chars)) {
       characterArray = chars.map(String)
@@ -186,6 +183,12 @@ export function parseTextBlueprintsFromTable(
   return Array.from(distinctMap.values()).sort((a, b) => a.chapterNumber - b.chapterNumber)
 }
 
+/**
+ * 解析 AI 输出的蓝图文本（双路径策略）
+ *
+ * PATH 1: Markdown 表格（主路径）— 更可靠
+ * PATH 2: JSON（fallback 路径）— 向后兼容
+ */
 export function parseTextBlueprints(content: string, startNum: number, endNum: number): ChapterBlueprint[] {
   try {
     const cleanContent = stripThinkingTags(content)
@@ -203,7 +206,7 @@ export function parseTextBlueprints(content: string, startNum: number, endNum: n
     // ==== PATH 2: JSON（fallback 路径）====
     console.log('[parseTextBlueprints] Markdown 表格未产生结果，回落 JSON 解析...')
 
-    // 预处理：移除 AI 常见的前导/后随说明文本（在第一个 { 之前和最后一个 } 之后的文本）
+    // 预处理：移除 AI 常见的前导/后随说明文本
     let jsonContent = cleanContent
     const firstBrace = jsonContent.indexOf('{')
     const firstBracket = jsonContent.indexOf('[')
@@ -215,7 +218,7 @@ export function parseTextBlueprints(content: string, startNum: number, endNum: n
       jsonContent = jsonContent.substring(start, end + 1)
     }
 
-    // 多层级提取 + 修复引擎（代码块提取 → 字符清洗 → JSON修复 → 逐对象兜底）
+    // 多层级提取 + 修复引擎
     let { parsed, repaired } = extractAndRepairJSON(jsonContent, false)
     if (!parsed) {
       const arrayResult = extractAndRepairJSON(jsonContent, true)
@@ -328,7 +331,6 @@ export function createDirectoryWorkflow(params: DirectoryWorkflowParams = { mode
           const { GenerateDirectoryCommand } = await import('./commands/directory.command')
           const cmd = new GenerateDirectoryCommand(params)
           const blueprints = await cmd.execute({ step: _step, context, callbacks })
-          // 返回可读摘要字符串（step.result 必须是 string，否则 AIOutputPanel 渲染会崩溃）
           return `已生成 ${blueprints.length} 章蓝图`
         },
       },
@@ -347,8 +349,7 @@ export function createDirectoryWorkflow(params: DirectoryWorkflowParams = { mode
           let merged: ChapterBlueprint[]
           if (params.mode === 'full') {
             merged = newBlueprints
-            // 全量模式：删除不在新列表中的旧蓝图（仅删除无关联草稿的，避免孤立数据）
-            // ★ 安全检查：仅在新蓝图覆盖率 >= 50% 时才删除旧蓝图，防止 AI 部分生成失败导致数据丢失
+            // 全量模式：删除不在新列表中的旧蓝图
             const newChapterNums = new Set(newBlueprints.map(b => b.chapterNumber))
             const allExisting = await loadDirectoryBlueprints()
             const coverageRatio = allExisting.length > 0
@@ -361,7 +362,6 @@ export function createDirectoryWorkflow(params: DirectoryWorkflowParams = { mode
                   try {
                     await ipc.invoke('db:blueprint-delete', existing.chapterNumber)
                   } catch {
-                    // 若有关联草稿，删除会失败，保留蓝图
                     callbacks.log(`  ⚠️ 第 ${existing.chapterNumber} 章旧蓝图保留（有关联草稿）`)
                   }
                 }

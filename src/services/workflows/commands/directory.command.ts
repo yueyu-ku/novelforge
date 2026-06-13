@@ -58,9 +58,8 @@ export class GenerateDirectoryCommand extends BaseWorkflowCommand<ChapterBluepri
     const newBlueprints: ChapterBlueprint[] = []
     // 使用游标追踪生成进度，支持 AI 超额返回时智能跳过后续批次
     let cursor = startChapter
-    // 多级重试策略：修复 → 中批次(5章) → 单章
     let consecutiveParseFailures = 0
-    const MAX_CONSECUTIVE_FAILURES = 5  // 增加容错次数（修复不算新 LLM 调用）
+    const MAX_CONSECUTIVE_FAILURES = 5
     // 动态批次大小
     let effectiveBatchSize = batchSize
 
@@ -89,9 +88,9 @@ export class GenerateDirectoryCommand extends BaseWorkflowCommand<ChapterBluepri
         const template = getPromptTemplate('chapter_blueprint_chunk')
         if (!template) throw new Error('模板丢失')
 
-        // ★ 构建上下文章节列表（清洗 + 截断，防止 prompt 膨胀和 JSON 格式混淆）
+        // 构建上下文章节列表（清洗 + 截断，防止 prompt 膨胀）
         const prevAll = [...existingBlueprints, ...newBlueprints]
-        // 最多取最近 20 章（从 100 章缩减，防止超出上下文窗口）
+        // 最多取最近 20 章，防止超出上下文窗口
         const chapterList = prevAll.slice(-20).map(c =>
           `第${c.chapterNumber}章 ${sanitizeForPrompt(c.title, 30)}：${sanitizeForPrompt(c.keyEvents, 80)}`
         ).join('\n')
@@ -113,32 +112,31 @@ export class GenerateDirectoryCommand extends BaseWorkflowCommand<ChapterBluepri
 
       callbacks.setProgress(Math.round(((cursor - startChapter) / (endChapter - startChapter + 1)) * 90))
 
-      // systemRole 由模板定义，不再硬编码
+      // systemRole 由模板定义
       const systemRole = getPromptTemplate('chapter_blueprint')?.systemRole || '你是一位经验丰富的网文架构师。'
       const resultText = await this.callLLM(prompt, systemRole, callbacks)
 
-      // ★ 关键修复：接受 AI 返回的从 cursor 到 endChapter 范围内的所有有效章节
-      // AI 可能一次性返回超出本批次（batchEnd）的章节，全部保留，避免浪费和重复 LLM 请求
+      // 接受 AI 返回的从 cursor 到 endChapter 范围内的所有有效章节
+      // AI 可能一次性返回超出本批次（batchEnd）的章节，全部保留
       const parsed = parseTextBlueprints(resultText, cursor, endChapter)
       newBlueprints.push(...parsed)
 
-      // ==== 批次入库 ====
+      // 批次入库
       if (parsed.length > 0) {
         await saveAllBlueprints(parsed)
         useProjectStore.getState().refreshFileTree()
       }
 
-      // 计算本次实际生成到的最大章节号，推进游标到已生成的最后一章之后
+      // 计算本次实际生成到的最大章节号，推进游标
       if (parsed.length > 0) {
         consecutiveParseFailures = 0
         effectiveBatchSize = batchSize  // 恢复完整批次大小
         const actualMaxChapter = Math.max(...parsed.map(p => p.chapterNumber))
         const actualMinChapter = Math.min(...parsed.map(p => p.chapterNumber))
 
-        // ★ 缺口检测：如果游标章节在结果中缺失，仅推进到缺失章（下一轮重试会填补）
+        // 缺口检测：如果游标章节在结果中缺失，下一轮重试会填补
         if (actualMinChapter > cursor) {
           callbacks.log(`  ⚠️ 第 ${cursor} 章在结果中缺失（检测到第 ${actualMinChapter}–${actualMaxChapter} 章），将在下一轮填补缺口`)
-          // 不推进 cursor，保持 cursor 不变，下一轮从缺失章重新生成
         } else {
           callbacks.log(`  ✅ 第 ${cursor}–${actualMaxChapter} 章完成（${parsed.length} 章）并已保存入库`)
           cursor = actualMaxChapter + 1
