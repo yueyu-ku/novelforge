@@ -7,7 +7,8 @@
 [![React](https://img.shields.io/badge/React-19-blue.svg)](https://reactjs.org/)
 [![Electron](https://img.shields.io/badge/Electron-41-black.svg)](https://www.electronjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6.svg)](https://www.typescriptlang.org/)
-[![Version](https://img.shields.io/badge/Version-2.0.0-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-2.1.1-green.svg)]()
+[![CI](https://github.com/LunaRime/novelforge/actions/workflows/webpack.yml/badge.svg)](https://github.com/LunaRime/novelforge/actions/workflows/webpack.yml)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPLv3-yellow.svg)](https://opensource.org/licenses/GPL-3.0)
 
 </div>
@@ -58,15 +59,55 @@
 
 ## 🚀 安装
 
-前往 [Releases](https://github.com/LunaRime/novelforge/releases) 下载：
-- **Windows**: `NovelForge-2.0.0-setup.exe` 或便携版
+### 📦 预构建版本（推荐）
+
+前往 [Releases](https://github.com/LunaRime/novelforge/releases) 下载最新安装包：
+- **Windows**: `NovelForge-2.1.1-setup.exe`（NSIS 安装程序，可选安装路径）
+
+### 🔨 源码构建
+
+#### 环境要求
+
+| 工具 | 版本 | 说明 |
+|------|------|------|
+| **Node.js** | `>= 22.x` | Electron 41 内置版本，CI 已验证 |
+| **npm** | `>= 10.x` | 随 Node.js 22 附带 |
+| **Python** | `>= 3.10` | 编译 `better-sqlite3` / `lancedb` 等原生模块 |
+| **C++ 工具链** | — | Windows: Visual Studio Build Tools · macOS: Xcode CLT · Linux: `build-essential` |
+
+#### 快速开始
 
 ```bash
-# 源码构建
+# 1. 克隆仓库
 git clone https://github.com/LunaRime/novelforge.git
 cd novelforge
-npm install && npm run dev
+
+# 2. 安装依赖
+#    Windows 设置环境变量跳过 Electron 二进制下载（节省 ~180 MB）
+#    macOS / Linux 直接 npm install 即可
+set ELECTRON_SKIP_BINARY_DOWNLOAD=1   # Windows CMD
+# $env:ELECTRON_SKIP_BINARY_DOWNLOAD=1  # Windows PowerShell
+# export ELECTRON_SKIP_BINARY_DOWNLOAD=1  # macOS / Linux
+
+npm install
+
+# 3. 开发模式（Vite HMR 热更新，无需完整 Electron 构建）
+npm run dev
+
+# 4. 完整构建（TypeScript 检查 → Vite 打包 → Electron Builder 安装包）
+npm run build
 ```
+
+#### 原生模块说明
+
+项目依赖 `better-sqlite3` 和 `@lancedb/lancedb` 两个原生模块。如果 `npm install` 后遇到模块加载错误，请执行：
+
+```bash
+# 针对 Electron 内置 Node 版本重新编译原生模块
+npm run rebuild
+```
+
+> `rebuild` 实际运行 `electron-rebuild -f -w better-sqlite3`，确保原生模块与 Electron 41 的 Node.js 版本 ABI 匹配。
 
 ---
 
